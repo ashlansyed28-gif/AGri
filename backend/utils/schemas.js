@@ -1,7 +1,7 @@
 const { z } = require('zod');
 
 const advisoryRequestSchema = z.object({
-  plot_id: z.string().uuid(),
+  plot_id: z.string().min(1, 'Plot ID is required'),
   soil_ph: z.number().min(0).max(14),
   n_level: z.enum(['LOW', 'MEDIUM', 'HIGH']),
   p_level: z.enum(['LOW', 'MEDIUM', 'HIGH']),
