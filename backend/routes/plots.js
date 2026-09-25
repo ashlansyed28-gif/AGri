@@ -7,6 +7,22 @@ router.use(auth);
 
 router.get('/', async (req, res) => {
   try {
+    // 1. Supabase Service Role client
+    if (db.supabase) {
+      try {
+        const { data: plots, error } = await db.supabase
+          .from('plots')
+          .select('*')
+          .eq('user_id', req.user.id)
+          .order('created_at', { ascending: false });
+
+        if (!error && plots) return res.json(plots);
+      } catch (sbErr) {
+        console.warn('Supabase plots fetch failed:', sbErr.message);
+      }
+    }
+
+    // 2. Raw PostgreSQL pool
     const pool = db.getPool();
     if (pool) {
       try {
@@ -20,6 +36,7 @@ router.get('/', async (req, res) => {
       }
     }
 
+    // 3. Fallback memory store
     const userPlots = db.memoryStore.plots.filter((p) => p.user_id === req.user.id);
     return res.json(userPlots);
   } catch (err) {
@@ -35,6 +52,28 @@ router.post('/', async (req, res) => {
   }
 
   try {
+    // 1. Supabase Service Role client
+    if (db.supabase) {
+      try {
+        const { data: plot, error } = await db.supabase
+          .from('plots')
+          .insert({
+            user_id: req.user.id,
+            plot_name,
+            crop_type,
+            acreage,
+            region,
+          })
+          .select('*')
+          .single();
+
+        if (!error && plot) return res.status(201).json(plot);
+      } catch (sbErr) {
+        console.warn('Supabase plot insert failed:', sbErr.message);
+      }
+    }
+
+    // 2. Raw PostgreSQL pool
     const pool = db.getPool();
     if (pool) {
       try {
@@ -48,6 +87,7 @@ router.post('/', async (req, res) => {
       }
     }
 
+    // 3. Fallback memory store
     const newPlot = {
       id: 'plot-' + Date.now(),
       user_id: req.user.id,
@@ -66,6 +106,31 @@ router.post('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
+    // 1. Supabase Service Role client
+    if (db.supabase) {
+      try {
+        const { data: plot } = await db.supabase
+          .from('plots')
+          .select('*')
+          .eq('id', req.params.id)
+          .eq('user_id', req.user.id)
+          .maybeSingle();
+
+        if (plot) {
+          const { data: advisories } = await db.supabase
+            .from('advisories')
+            .select('*')
+            .eq('plot_id', req.params.id)
+            .order('created_at', { ascending: false });
+
+          return res.json({ ...plot, advisories: advisories || [] });
+        }
+      } catch (sbErr) {
+        console.warn('Supabase plot detail fetch failed:', sbErr.message);
+      }
+    }
+
+    // 2. Raw PostgreSQL pool
     const pool = db.getPool();
     if (pool) {
       try {
@@ -85,6 +150,7 @@ router.get('/:id', async (req, res) => {
       }
     }
 
+    // 3. Fallback memory store
     const plot = db.memoryStore.plots.find(
       (p) => p.id === req.params.id && p.user_id === req.user.id
     );

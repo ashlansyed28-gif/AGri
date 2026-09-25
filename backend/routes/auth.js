@@ -16,7 +16,35 @@ router.post('/register', async (req, res) => {
   try {
     const hashed = await bcrypt.hash(password, 10);
 
-    // Try real database first
+    // 1. Try Supabase Service Role client if configured
+    if (db.supabase) {
+      try {
+        const { data: existing } = await db.supabase
+          .from('users')
+          .select('id')
+          .eq('email', email)
+          .maybeSingle();
+
+        if (existing) {
+          return res.status(400).json({ error: 'An account with this email already exists.' });
+        }
+
+        const { data: user, error } = await db.supabase
+          .from('users')
+          .insert({ email, full_name, password_hash: hashed })
+          .select('id, email, full_name, created_at')
+          .single();
+
+        if (!error && user) {
+          const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '7d' });
+          return res.status(201).json({ token, user });
+        }
+      } catch (sbErr) {
+        console.warn('Supabase service client query failed:', sbErr.message);
+      }
+    }
+
+    // 2. Try raw PostgreSQL pool if configured
     const pool = db.getPool();
     if (pool) {
       try {
@@ -37,7 +65,7 @@ router.post('/register', async (req, res) => {
       }
     }
 
-    // In-memory fallback if database not yet configured
+    // 3. Fallback to memory store
     const existing = db.memoryStore.users.find((u) => u.email === email);
     if (existing) {
       return res.status(400).json({ error: 'An account with this email already exists.' });
@@ -71,6 +99,28 @@ router.post('/login', async (req, res) => {
   }
 
   try {
+    // 1. Try Supabase Service Role client
+    if (db.supabase) {
+      try {
+        const { data: user } = await db.supabase
+          .from('users')
+          .select('*')
+          .eq('email', email)
+          .maybeSingle();
+
+        if (user) {
+          const valid = await bcrypt.compare(password, user.password_hash);
+          if (!valid) return res.status(400).json({ error: 'Invalid password.' });
+
+          const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '7d' });
+          return res.json({ token, user: { id: user.id, email: user.email, full_name: user.full_name } });
+        }
+      } catch (sbErr) {
+        console.warn('Supabase login check failed:', sbErr.message);
+      }
+    }
+
+    // 2. Try raw PostgreSQL pool
     const pool = db.getPool();
     if (pool) {
       try {
@@ -88,7 +138,7 @@ router.post('/login', async (req, res) => {
       }
     }
 
-    // In-memory fallback check
+    // 3. Fallback memory store
     const user = db.memoryStore.users.find((u) => u.email === email);
     if (!user) {
       return res.status(400).json({ error: 'User not found. Please register first.' });

@@ -14,20 +14,34 @@ router.post('/generate', limiter, async (req, res) => {
   try {
     const data = advisoryRequestSchema.parse(req.body);
 
-    // Fetch plot context
+    // 1. Fetch plot context via Supabase or PG pool
     let plot = null;
-    const pool = db.getPool();
-    if (pool) {
+    if (db.supabase) {
       try {
-        const plotCheck = await pool.query(
-          'SELECT * FROM plots WHERE id = $1 AND user_id = $2',
-          [data.plot_id, req.user.id]
-        );
-        if (plotCheck.rows.length > 0) {
-          plot = plotCheck.rows[0];
-        }
+        const { data: p } = await db.supabase
+          .from('plots')
+          .select('*')
+          .eq('id', data.plot_id)
+          .eq('user_id', req.user.id)
+          .maybeSingle();
+        if (p) plot = p;
       } catch (e) {
-        console.warn('Plot check DB failed:', e.message);
+        console.warn('Supabase plot query failed:', e.message);
+      }
+    }
+
+    if (!plot) {
+      const pool = db.getPool();
+      if (pool) {
+        try {
+          const plotCheck = await pool.query(
+            'SELECT * FROM plots WHERE id = $1 AND user_id = $2',
+            [data.plot_id, req.user.id]
+          );
+          if (plotCheck.rows.length > 0) plot = plotCheck.rows[0];
+        } catch (e) {
+          console.warn('Plot check DB failed:', e.message);
+        }
       }
     }
 
@@ -86,7 +100,7 @@ Generate a comprehensive crop management advisory.`;
       }
     }
 
-    // Default scientific advisory if Gemini key not yet supplied or API quota exceeded
+    // Default scientific advisory fallback
     if (!aiRecommendation) {
       aiRecommendation = {
         summary: `Soil analysis for ${plot.crop_type} indicates a pH of ${data.soil_ph} during the ${data.growth_stage} phase under ${data.weather.toLowerCase()} conditions. Immediate attention to N-P-K nutrient balance is recommended.`,
@@ -120,7 +134,33 @@ Generate a comprehensive crop management advisory.`;
       };
     }
 
-    // Persist to Postgres if available
+    // Persist via Supabase Service Role client
+    if (db.supabase) {
+      try {
+        const { data: adv, error } = await db.supabase
+          .from('advisories')
+          .insert({
+            plot_id: data.plot_id,
+            soil_ph: data.soil_ph,
+            n_level: data.n_level,
+            p_level: data.p_level,
+            k_level: data.k_level,
+            moisture_percent: data.moisture_percent,
+            weather: data.weather,
+            growth_stage: data.growth_stage,
+            ai_recommendation_json: aiRecommendation,
+          })
+          .select('*')
+          .single();
+
+        if (!error && adv) return res.status(201).json(adv);
+      } catch (sbErr) {
+        console.warn('Supabase advisory insert failed:', sbErr.message);
+      }
+    }
+
+    // Persist via raw PostgreSQL pool
+    const pool = db.getPool();
     if (pool) {
       try {
         const insertRes = await pool.query(
@@ -145,7 +185,7 @@ Generate a comprehensive crop management advisory.`;
       }
     }
 
-    // Save to memory store
+    // Fallback to memory store
     const newAdvisory = {
       id: 'adv-' + Date.now(),
       plot_id: data.plot_id,
@@ -168,6 +208,23 @@ Generate a comprehensive crop management advisory.`;
 
 router.get('/:id', async (req, res) => {
   try {
+    // 1. Supabase Service Role client
+    if (db.supabase) {
+      try {
+        const { data: adv } = await db.supabase
+          .from('advisories')
+          .select('*, plots!inner(user_id)')
+          .eq('id', req.params.id)
+          .eq('plots.user_id', req.user.id)
+          .maybeSingle();
+
+        if (adv) return res.json(adv);
+      } catch (sbErr) {
+        console.warn('Supabase advisory fetch failed:', sbErr.message);
+      }
+    }
+
+    // 2. Raw PostgreSQL pool
     const pool = db.getPool();
     if (pool) {
       try {
@@ -177,14 +234,13 @@ router.get('/:id', async (req, res) => {
            WHERE a.id = $1 AND p.user_id = $2`,
           [req.params.id, req.user.id]
         );
-        if (advRes.rows.length > 0) {
-          return res.json(advRes.rows[0]);
-        }
+        if (advRes.rows.length > 0) return res.json(advRes.rows[0]);
       } catch (dbErr) {
         console.warn('DB query failed for advisory by id, checking memory:', dbErr.message);
       }
     }
 
+    // 3. Fallback memory store
     const advisory = db.memoryStore.advisories.find((a) => a.id === req.params.id);
     if (!advisory) return res.status(404).json({ error: 'Advisory not found' });
     return res.json(advisory);

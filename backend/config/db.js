@@ -1,4 +1,5 @@
 const { Pool } = require('pg');
+const { supabase } = require('./supabase');
 
 let pool = null;
 
@@ -6,7 +7,7 @@ function getPool() {
   if (pool) return pool;
 
   const connectionString = process.env.DATABASE_URL;
-  if (!connectionString || connectionString.includes('[YOUR-PASSWORD]')) {
+  if (!connectionString || connectionString.includes('[YOUR-PASSWORD]') || connectionString.startsWith('sb_')) {
     return null;
   }
 
@@ -42,10 +43,11 @@ const memoryStore = {
 
 module.exports = {
   getPool,
+  supabase,
   memoryStore,
   query: async (text, params) => {
     const p = getPool();
-    if (!p) throw new Error('Database connection not configured.');
+    if (!p) throw new Error('PostgreSQL database connection not configured.');
     return p.query(text, params);
   },
 };
