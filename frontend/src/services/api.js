@@ -1,6 +1,15 @@
 import axios from 'axios';
 
-// Determine backend URL
+// Check if a dedicated backend endpoint is available
+const hasRemoteBackend = () => {
+  if (import.meta.env.VITE_API_URL) return true;
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    if (host === 'localhost' || host === '127.0.0.1') return true;
+  }
+  return false;
+};
+
 const getBaseURL = () => {
   if (import.meta.env.VITE_API_URL) {
     const url = import.meta.env.VITE_API_URL.trim();
@@ -12,7 +21,7 @@ const getBaseURL = () => {
       return 'http://localhost:5000/api';
     }
   }
-  return '/api';
+  return '';
 };
 
 const axiosInstance = axios.create({
@@ -28,6 +37,17 @@ axiosInstance.interceptors.request.use((config) => {
   }
   return config;
 });
+
+// Helper to determine if an error requires falling back to client storage
+const isFallbackNeeded = (err) => {
+  if (!err || !err.response) return true; // Network error / ERR_CONNECTION_REFUSED
+  const status = err.response.status;
+  // 404 Not Found, 405 Method Not Allowed (static asset rewrite), or server errors
+  if (status === 404 || status === 405 || status >= 500) return true;
+  const contentType = err.response.headers?.['content-type'] || '';
+  if (contentType.includes('text/html')) return true;
+  return false;
+};
 
 // Client-side storage fallback engine (for seamless client deployment)
 const storage = {
@@ -117,7 +137,7 @@ const clientFallback = {
       const newUser = {
         id: 'usr-' + Date.now(),
         email: body.email,
-        full_name: body.full_name,
+        full_name: body.full_name || 'Farmer',
         created_at: new Date().toISOString(),
       };
       users.push(newUser);
@@ -129,20 +149,20 @@ const clientFallback = {
     // 2. Login
     if (path === '/auth/login') {
       const users = storage.getUsers();
-      const user = users.find((u) => u.email === body.email);
+      let user = users.find((u) => u.email === body.email);
       if (!user) {
-        // Allow instant onboarding for first-time testers if no account exists yet
-        const newUser = {
+        // Automatic onboarding if user tests login first
+        user = {
           id: 'usr-' + Date.now(),
           email: body.email,
           full_name: body.email.split('@')[0],
           created_at: new Date().toISOString(),
         };
-        users.push(newUser);
+        users.push(user);
         storage.saveUsers(users);
-        return { data: { token: 'tok-' + Date.now(), user: newUser } };
       }
-      return { data: { token: 'tok-' + Date.now(), user } };
+      const token = 'tok-' + Date.now();
+      return { data: { token, user } };
     }
 
     // 3. Create Plot
@@ -222,23 +242,31 @@ const clientFallback = {
   },
 };
 
-// Proxy handler: Attempts network call first; seamlessly handles client-side fallback if server is unreachable
+// Main API interface:
+// If no remote backend is configured on production, directly use clientFallback to prevent 405 errors.
+// If a backend is configured, attempt the HTTP call and gracefully fall back if unavailable.
 const api = {
   get: async (url, config) => {
+    if (!hasRemoteBackend()) {
+      return await clientFallback.get(url);
+    }
     try {
       return await axiosInstance.get(url, config);
     } catch (err) {
-      if (!err.response || err.code === 'ERR_NETWORK' || err.response.status === 404) {
+      if (isFallbackNeeded(err)) {
         return await clientFallback.get(url);
       }
       throw err;
     }
   },
   post: async (url, data, config) => {
+    if (!hasRemoteBackend()) {
+      return await clientFallback.post(url, data);
+    }
     try {
       return await axiosInstance.post(url, data, config);
     } catch (err) {
-      if (!err.response || err.code === 'ERR_NETWORK' || err.response.status === 404) {
+      if (isFallbackNeeded(err)) {
         return await clientFallback.post(url, data);
       }
       throw err;
